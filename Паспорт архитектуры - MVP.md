@@ -1,111 +1,136 @@
-# Паспорт архитектуры — модульная платформа обработки сейсмических данных на HPC
+# Паспорт архитектуры — SPI
 
-**Версия:** 4.0 (рабочая)  
-**Назначение:** описание архитектуры MVP, структуры frontend/backend, модели данных и взаимодействия с HPC/SLURM.
+**Полное название:** Seismic Processing Interface  
+**Версия:** 4.0
+**Назначение:** архитектура MVP: frontend, backend, хранение данных, модель PostgreSQL и выполнение Pipeline на HPC с использованием SLURM.
 
-## 1. Архитектурная схема верхнего уровня
+---
 
-Система состоит из браузерного frontend, backend API, PostgreSQL, внутреннего бинарного хранилища Dataset и вычислительных SLURM Jobs.
+## 1. Общая архитектура
 
-- **Frontend:** React + TypeScript. Отвечает за проекты, Data Assets, Dataset, редактор Pipeline, Compute Profiles и мониторинг запусков.
-- **Backend:** Python + FastAPI/Uvicorn. Предоставляет API, управляет проектами и Pipeline, записывает метаданные в PostgreSQL и передаёт вычислительную работу SLURM.
-- **Execution Manager:** часть backend. Создаёт Pipeline Run/Node Run, разбирает граф, формирует partition jobs, отправляет их в SLURM и отслеживает выполнение.
-- **Worker:** запускается внутри каждого вычислительного SLURM Job. Один job обрабатывает одну partition и выполняет последовательность модулей соответствующего Pipeline Node.
-- **PostgreSQL:** хранит каталог и идентичность объектов, метаданные Dataset и Data Assets, версии, связи Pipeline, состояния выполнения и `EXECUTION_EVENTS`.
-- **Dataset Storage:** постоянное файловое хранилище собственного бинарного формата Dataset на HPC. Содержит амплитудные массивы, заголовки и структуру данных. Это не таблицы PostgreSQL.
-- **External HPC File Storage:** хранит исходные SEG-Y, экспортированные SEG-Y, `runinfo.log`, `stdout` и `stderr`.
+SPI — персональная веб-платформа для организации и выполнения операций с сейсмическими данными на HPC.
 
-Web App запускается под Unix-учётной записью пользователя как отдельное веб-задание на HPC. Пользователь открывает его через браузер, обычно через SSH Tunnel. Вычислительные jobs отделены от Web App и отправляются через SLURM.
+Приложение и все его файлы размещаются в одном каталоге:
 
-## 2. Компонентная и исполнительная архитектура
-
-```mermaid
-flowchart TB
-    USER[Пользовательский браузер]
-    TUNNEL[SSH Tunnel]
-    FE[Frontend<br/>React + TypeScript]
-    API[Backend API<br/>FastAPI / Uvicorn<br/>Web App SLURM Job]
-    EM[Execution Manager]
-    PG[(PostgreSQL<br/>каталог, метаданные, версии,<br/>статусы, EXECUTION_EVENTS)]
-    SCHED[SLURM Scheduler]
-    W1[Worker<br/>Partition Job 1]
-    W2[Worker<br/>Partition Job 2]
-    DS[(Dataset Storage<br/>собственный бинарный формат)]
-    FS[(HPC File Storage<br/>исходные/экспортные файлы,<br/>runinfo.log, stdout, stderr)]
-
-    USER --> TUNNEL --> FE
-    FE <-->|HTTP API| API
-    API <--> PG
-    API --> EM
-    EM <--> SCHED
-    SCHED --> W1
-    SCHED --> W2
-    W1 <--> PG
-    W2 <--> PG
-    W1 <--> DS
-    W2 <--> DS
-    W1 <--> FS
-    W2 <--> FS
-    API -->|читает статусы и события| PG
+```text
+/home/user/spi
 ```
 
-### 2.1. Frontend
+Web App запускается под Unix-учётной записью пользователя. Пользователь открывает интерфейс в браузере через SSH Tunnel. Backend предоставляет API, работает с PostgreSQL и управляет вычислительными заданиями SLURM. Каждый вычислительный SLURM Job обрабатывает одну partition одного Pipeline Node.
 
-Frontend — одностраничное React-приложение на TypeScript. Оно не читает HPC-файлы напрямую и не взаимодействует со SLURM. Все операции выполняются через Backend API.
+Основные компоненты:
 
-Основные разделы интерфейса:
+| Компонент | Назначение |
+|---|---|
+| Frontend | Интерфейс проектов, файлов, Dataset, Pipeline, вычислительных профилей и мониторинга |
+| Backend API | Принимает запросы frontend, проверяет данные и вызывает прикладные сервисы |
+| PostgreSQL | Хранит проекты, настройки, каталог Dataset, версии, Pipeline, состояния запусков и события |
+| Dataset Storage | Хранит амплитуды, заголовки и структуру Dataset в собственном бинарном формате SPI |
+| Execution Manager | Планирует Pipeline, создаёт Node Runs и SLURM Jobs, отслеживает их состояние |
+| SLURM Worker | Выполняет последовательность модулей одного Pipeline Node для своей partition |
 
-- **Projects:** список и управление персональными проектами.
-- **Data Assets:** регистрация и просмотр внешних файлов на HPC.
-- **Datasets:** просмотр Dataset, версий и технических метаданных.
-- **Module Catalog:** доступные в MVP модули и их параметры.
-- **Pipeline Editor:** граф Pipeline, редактирование состава и порядка модулей узла, параметры модулей и настройки `partition`/`union` на связях.
-- **Compute Profiles:** выбор, создание и сохранение профилей пользователя.
-- **Pipeline Run Monitor:** статусы Pipeline Run, Node Runs, Module Runs и SLURM Jobs, `runtime.log`, ссылки на `runinfo.log`, `stdout` и `stderr`.
+PostgreSQL и бинарные данные Dataset физически находятся внутри `/home/user/spi`. PostgreSQL хранит описание и связи Dataset; амплитудные массивы находятся в бинарных файлах Dataset Storage, а не в таблицах PostgreSQL.
 
-Для MVP мониторинг обновляется периодическими запросами к API (polling), ориентировочно каждые 2–3 секунды. WebSocket не является обязательным условием MVP. Интервал обновления задаётся конфигурацией frontend/backend.
+## 2. Размещение файлов SPI
 
-### 2.2. Backend
+Всё файловое содержимое платформы размещается под `/home/user/spi`. Физические каталоги организованы по назначению: внешние файлы, внутренние Dataset, файлы запусков, база данных и временные данные.
 
-Backend построен на FastAPI/Uvicorn и SQLAlchemy 2.0. Для SQLAlchemy предпочтителен Async API; Sync API допустим, если он упрощает реализацию или лучше подходит выбранным библиотекам. API-слой принимает запросы frontend, проверяет входные данные и вызывает сервисы. Вычислительные алгоритмы не выполняются внутри HTTP-запросов.
+```text
+/home/user/spi/
+├── frontend/
+│   └── src/
+├── backend/
+├── database/
+│   └── postgres/
+│       └── data/                    # Файлы PostgreSQL (PGDATA)
+├── storage/
+│   ├── data/                        # Физические файлы Data Assets: исходные и экспортированные файлы
+│   │   └── {project_id}/
+│   └── datasets/                    # Внутренние бинарные Dataset и их версии
+│       └── {project_id}/
+│           └── {dataset_id}/
+│               └── versions/
+│                   └── {version_id}/ # Полное сохранённое состояние Dataset
+├── runs/
+│   └── projects/
+│       └── pipelines/
+│           └── {project_id}/
+│               └── {pipeline_id}/
+│                   └── {pipeline_run_id}/
+│                       └── {pipelinenodename}_{executionnumber}_{partitionnumber}/
+│                           ├── runtime.log  # Только пока SLURM Job выполняется
+│                           ├── runinfo.log  # Итоговый отчёт после завершения SLURM Job
+│                           ├── stdout.log   # SLURM stdout
+│                           └── stderr.log   # SLURM stderr
+├── tmp/                             # Временные файлы во время работы
+└── config/                          # Конфигурация SPI
+```
 
-Ключевые компоненты:
+Таблица PostgreSQL сохраняет имя `data_assets`; изменяется только имя физического каталога: файлы Data Assets размещаются в `storage/data/`. Внутренние Dataset Versions размещаются в `storage/datasets/`. Фактическое разбиение одной версии Dataset на бинарные файлы ещё не фиксируется: каталог версии может содержать один или несколько файлов и индекс/манифест.
 
-- **API layer:** REST endpoints для Projects, Data Assets, Datasets, модулей, Pipelines, Compute Profiles, запусков, событий и логов.
-- **Application services:** прикладные сценарии регистрации файлов, импорта/загрузки/сохранения/экспорта Dataset, редактирования Pipeline и запуска Pipeline Run.
-- **Database layer:** SQLAlchemy models/repositories и PostgreSQL session management.
-- **Execution Manager:** анализирует граф, проверяет зависимости, создаёт записи запусков, подготавливает jobs и контролирует их состояние.
-- **SLURM adapter:** отправляет jobs и получает состояние через доступные команды/интерфейсы SLURM (например, `sbatch`, `squeue`, `sacct`).
-- **Partition Worker:** точка входа вычислительного SLURM Job. Получает snapshot запуска и параметры своей partition, выполняет назначенную последовательность модулей.
-- **Module Registry/Runner:** предоставляет определения модулей MVP и запускает их последовательно в одном runtime-контексте job.
-- **Dataset Reader/Writer:** читает/пишет собственный бинарный Dataset и формирует Working Dataset в RAM.
-- **SEG-Y Reader/Writer:** парсит входные SEG-Y и экспортирует сохранённый Dataset в SEG-Y.
-- **Event/Log service:** записывает структурированные события, обеспечивает оперативное представление `runtime.log` и формирует постоянный `runinfo.log`.
+### 2.1. Правила размещения и жизненного цикла
 
-### 2.3. SLURM и выполнение partition jobs
+- Исходные и экспортированные физические файлы, зарегистрированные как Data Assets, размещаются в `/home/user/spi/storage/data/{project_id}/`; сведения о них хранятся в таблице `data_assets`.
+- Полные бинарные данные Dataset Versions размещаются в `/home/user/spi/storage/datasets/{project_id}/{dataset_id}/versions/{version_id}/`; PostgreSQL хранит идентичность, метаданные, версии и ссылки на физические данные.
+- `PGDATA` размещается в `/home/user/spi/database/postgres/data`.
+- Файлы запусков размещаются под `/home/user/spi/runs/projects/pipelines/{project_id}/{pipeline_id}/{pipeline_run_id}/`. Для каждой partition используется каталог `{pipelinenodename}_{executionnumber}_{partitionnumber}`.
+- `runtime.log` доступен во время выполнения соответствующего SLURM Job. После завершения job временный `runtime.log` удаляется.
+- После завершения каждого SLURM Job создаётся `runinfo.log`; он сохраняется независимо от результата выполнения.
+- `stdout.log` и `stderr.log` сохраняются для диагностики SLURM Job. Отдельные логи модулей не создаются.
+- Временные файлы размещаются в `/home/user/spi/tmp` и удаляются по правилам соответствующего процесса.
 
-1. Пользователь запускает Pipeline через frontend.
-2. Backend создаёт `PIPELINE_RUN` и сохраняет snapshot схемы, параметров, связей, Compute Profiles и Partition/Union config.
-3. Execution Manager определяет готовые Pipeline Nodes и создаёт `NODE_RUN`.
-4. Для каждой partition формируется отдельный SLURM Job. Если разбиение не задано, узел может выполняться одним job для всего назначенного Dataset.
-5. Один SLURM Job обрабатывает одну partition на одном вычислительном узле. Внутри job модули Pipeline Node выполняются последовательно в порядке добавления.
-6. Количество одновременно активных jobs ограничивается настройкой Pipeline Node. Ресурсы одного job берутся из выбранного Compute Profile.
-7. Worker обновляет статусы Module Runs/SLURM Job и записывает `EXECUTION_EVENTS`.
-8. После завершения каждого job формируется `runinfo.log` для его partition независимо от остальных jobs.
-9. Если одна partition завершается с ошибкой, остальные jobs не отменяются; новые jobs продолжают отправляться по мере освобождения слотов. Node Run становится `failed`, если хотя бы одна обязательная partition завершилась неуспешно.
-10. Узел-получатель с настройкой `union` запускается только после успешного завершения всех upstream partition jobs, необходимых для его входного Dataset.
+## 3. Потоки данных и типы операций
 
-### 2.4. Мониторинг и журналы
+В MVP используются четыре типа операций. Они описывают направление переноса данных, а не научную функцию модуля.
 
-- Статусы `PIPELINE_RUNS`, `NODE_RUNS`, `MODULE_RUNS` и `SLURM_JOBS` хранятся в PostgreSQL и не выводятся только из лог-файлов.
-- `EXECUTION_EVENTS` — структурированная хронология событий и основа мониторинга.
-- `runtime.log` доступен во время работы SLURM Job и строится/обновляется на основе событий. После завершения job интерфейс показывает сообщение о завершении и предлагает открыть `runinfo.log`.
-- `runinfo.log` создаётся после завершения каждого partition job, в том числе при ошибке, в каталоге `{pipelinenodename}_{executionnumber}_{partitionnumber}`.
-- `stdout` и `stderr` — отдельные системные потоки SLURM Job. Они сохраняются для диагностики процесса, окружения и вычислительного узла.
-- Отдельные module logs в MVP не создаются.
-- После перезапуска Web App состояние восстанавливается из PostgreSQL; активные Job ID сверяются с состоянием SLURM. Логи не являются источником истины о статусе.
+| Тип операции | Направление | Основной модуль | Назначение |
+|---|---|---|---|
+| `import_dataset` | HPC → DB | `SEGYIN` + сохранение через `OUT` | Чтение внешнего SEG-Y, парсинг заголовков, формирование Working Dataset и сохранение первого внутреннего Dataset |
+| `load_dataset` | DB → RAM | `IN` | Загрузка сохранённого Dataset или назначенной partition в оперативную память |
+| `save_dataset` | RAM → DB | `OUT` | Сохранение полного Working Dataset, включая амплитуды, заголовки и структуру, как новой Dataset Version |
+| `export_dataset` | DB → HPC | `SEGYOUT` | Чтение сохранённого Dataset и создание внешнего файла SEG-Y |
 
-## 3. Frontend — структура каталогов
+Здесь `DB` означает постоянное хранилище Dataset платформы: бинарные данные находятся в `/home/user/spi/storage/datasets`, а каталог, метаданные, версии и ссылки на физические данные — в PostgreSQL. Амплитудные массивы не записываются в таблицы PostgreSQL.
+
+### 3.1. Роли модулей MVP
+
+- **`SEGYIN`** читает зарегистрированный исходный SEG-Y, разбирает заголовки и считывает амплитуды. На время импорта формируется рабочее представление Dataset в RAM.
+- **`IN`** загружает сохранённый Dataset или назначенную partition из внутреннего бинарного хранилища в RAM.
+- **`OUT`** сохраняет полное текущее состояние Working Dataset в бинарное хранилище SPI и регистрирует новую Dataset Version в PostgreSQL. OUT не экспортирует SEG-Y.
+- **`SEGYOUT`** читает сохранённый Dataset и формирует внешний SEG-Y. Экспортированный файл регистрируется как Data Asset.
+
+Для MVP реализуются эти четыре модуля. FILTER, SORT, NORMALIZE, FOURIER и другие научные модули относятся к следующему этапу. Для них предусматривается будущий пользовательский тип вычислений RAM → RAM с возможностью прямой записи результата RAM → HPC (например, Artifact); такие пользовательские модули в MVP не поставляются.
+
+### 3.2. Working Dataset и сохранённый Dataset
+
+**Working Dataset** — рабочее представление Dataset в RAM вычислительного узла. Оно содержит реальные амплитудные массивы, заголовки трасс, технические метаданные и структуру/индексацию трасс. Последовательные модули одного SLURM Job работают с одним рабочим состоянием.
+
+**Сохранённый Dataset** — полное содержимое Dataset во внутреннем бинарном формате SPI на диске. PostgreSQL хранит идентичность Dataset, версии, метаданные и расположение бинарных данных.
+
+- `SEGYIN` формирует рабочее представление при импорте.
+- `OUT` сохраняет его полное содержимое.
+- `IN` загружает сохранённую версию или её partition в RAM.
+- Последующие модули работают с Working Dataset.
+- `OUT` сохраняет изменения как новую Dataset Version.
+- `SEGYOUT` экспортирует сохранённую версию в SEG-Y.
+
+## 4. Frontend
+
+Frontend — одностраничное приложение React + TypeScript. Оно взаимодействует с системой только через Backend API. Frontend не обращается напрямую к PostgreSQL, файловой системе или SLURM.
+
+Основные экраны:
+
+- **Projects:** список, создание, переименование и открытие проектов.
+- **Data Assets:** регистрация файлов, просмотр формата, размера, пути и технических метаданных.
+- **Datasets:** список Dataset, версии и их метаданные.
+- **Module Catalog:** доступные модули MVP, версии, описание и параметры.
+- **Pipeline Editor:** граф Pipeline; добавление модулей и настройка их параметров; настройка `partition` и `union` на связях.
+- **Compute Profiles:** выбор, создание, редактирование и сохранение профилей ресурсов пользователя.
+- **Pipeline Run Monitor:** статусы Pipeline Run, Node Runs, Module Runs и SLURM Jobs; оперативный `runtime.log`; ссылки на `runinfo.log`, `stdout` и `stderr`.
+
+Порядок модулей в Pipeline Node определяется порядком их добавления пользователем. Внутри одного SLURM Job модули выполняются последовательно. Мониторинг в MVP использует периодические запросы frontend к Backend API (polling); WebSocket не требуется.
+
+### 4.1. Структура frontend
 
 ```text
 frontend/
@@ -148,18 +173,29 @@ frontend/
         styles/
 ```
 
-Назначение основных частей:
+`api/` содержит функции Backend API; `pages/` — страницы; `features/` — функциональность отдельных разделов; `components/` — общие визуальные компоненты; `hooks/`, `types/`, `utils/` и `styles/` — общие frontend-механизмы.
 
-- `app/` — сборка приложения и маршрутизация.
-- `api/` — типизированные функции обращения к Backend API.
-- `pages/` — страницы верхнего уровня.
-- `features/` — интерфейсные сценарии конкретных доменов.
-- `components/` — общие компоненты и элементы компоновки.
-- `hooks/`, `types/`, `utils/`, `styles/` — повторно используемая логика, типы, утилиты и стили.
+## 5. Backend
 
-Внутри одного экрана Pipeline Editor пользователь редактирует состав и порядок модулей Pipeline Node и их параметры. Параметры `partition` и `union` настраиваются на соответствующих связях графа.
+Backend — Python + FastAPI/Uvicorn. SQLAlchemy 2.0 используется для работы с PostgreSQL; предпочтителен Async API, Sync API допустим, если он практичнее для конкретной части приложения.
 
-## 4. Backend — структура каталогов
+Backend разделён на следующие части:
+
+| Часть | Ответственность |
+|---|---|
+| API | HTTP endpoints и проверка входных запросов |
+| Services | Прикладные сценарии проектов, Data Assets, Dataset, Pipeline и Compute Profiles |
+| Database | SQLAlchemy models, repositories и транзакции PostgreSQL |
+| Execution Manager | Планирование графа, создание запусков и управление SLURM Jobs |
+| SLURM Adapter | Отправка заданий и получение их состояния через SLURM |
+| Worker Runtime | Исполнение модулей внутри SLURM Job |
+| Dataset I/O | Чтение и запись внутреннего бинарного Dataset |
+| SEG-Y I/O | Импорт и экспорт SEG-Y |
+| Monitoring | Запись Execution Events и формирование `runtime.log`/`runinfo.log` |
+
+HTTP API не выполняет вычислительные алгоритмы. Backend проверяет запрос, сохраняет необходимые данные и поручает исполнение SLURM Job.
+
+### 5.1. Структура backend
 
 ```text
 backend/
@@ -179,7 +215,6 @@ backend/
         core/
             config.py
             dependencies.py
-            security.py
         db/
             base.py
             session.py
@@ -203,15 +238,13 @@ backend/
             partition_worker.py
             module_runner.py
             working_dataset.py
+        dataset/
             dataset_reader.py
             dataset_writer.py
-        storage/
-            dataset_store.py
-            data_asset_store.py
             binary_format/
+        segy/
             segy_reader.py
             segy_writer.py
-            log_store.py
         modules/
             registry.py
             definitions/
@@ -219,88 +252,122 @@ backend/
                 input.py
                 output.py
                 segyout.py
-        events/
+        monitoring/
             event_service.py
             runtime_log.py
             runinfo_log.py
+            slurm_output.py
+        storage/
+            paths.py
+            data_asset_store.py
+            dataset_store.py
     migrations/
     tests/
     pyproject.toml
 ```
 
-Это логическая структура проекта, а не обязательное требование к каждому физическому Python-файлу. При реализации её можно немного упростить, сохраняя разделение API, сервисов, БД, исполнения, runtime и хранения.
+Структура показывает логические границы и может быть упрощена при реализации. Модули MVP зарегистрированы в `modules/definitions/`; `module_runner.py` запускает их по порядку в контексте одного partition job.
 
-## 5. Типы операций и Dataset lifecycle
+### 5.2. Execution Manager и SLURM Worker
 
-В MVP используются четыре типа операций. Полное описание находится в отдельном файле `operation_types.md`.
+**Execution Manager** работает в составе Backend и отвечает за оркестрацию:
 
-| Тип | Направление | Назначение |
-|---|---|---|
-| `import_dataset` | HPC → DB | Импорт внешнего SEG-Y во внутренний Dataset. `SEGYIN` читает/парсит файл и формирует Working Dataset; `OUT` сохраняет его в бинарное хранилище и регистрирует Dataset Version. RAM — временный этап импорта. |
-| `load_dataset` | DB → RAM | `IN` загружает сохранённый Dataset или partition в Working Dataset. |
-| `save_dataset` | RAM → DB | `OUT` сохраняет полное текущее состояние Working Dataset, включая амплитуды, заголовки и структуру, как новую Dataset Version. |
-| `export_dataset` | DB → HPC | `SEGYOUT` экспортирует сохранённый Dataset во внешний SEG-Y. |
+1. Принимает команду запуска Pipeline.
+2. Создаёт `PIPELINE_RUN` и сохраняет snapshot Pipeline, параметров модулей, связей, Compute Profiles и Partition/Union настроек.
+3. Определяет готовые Pipeline Nodes и создаёт `NODE_RUN`.
+4. Разбивает входной Dataset согласно `partition` на связи, если такая настройка задана.
+5. Создаёт отдельный SLURM Job для каждой partition. Если разбиение не задано, создаётся один job для всего входа узла.
+6. Ограничивает число одновременно активных jobs лимитом Pipeline Node. Ресурсы каждого job берутся из выбранного Compute Profile.
+7. Отправляет задания в SLURM и сохраняет Job ID.
+8. Отслеживает состояние заданий через SLURM и события Worker, обновляет PostgreSQL.
+9. Запускает зависимые узлы после выполнения условий входящих связей, включая `union`, если он задан.
 
-`DB` здесь — постоянное хранилище Dataset платформы на HPC плюс его PostgreSQL-каталог. Амплитудные массивы находятся в собственных бинарных файлах, а не в PostgreSQL.
+**Один SLURM Job выполняет одну partition на одном вычислительном узле.** Внутри job Worker последовательно выполняет все модули соответствующего Pipeline Node. Для каждого фактического запуска модуля создаётся `MODULE_RUN`.
 
-Dataset имеет два состояния:
+Количество одновременно работающих jobs задаётся на уровне Pipeline Node. Пользователь выбирает Compute Profile с CPU, RAM и walltime одного job. Профили принадлежат пользователю и доступны во всех его Projects.
 
-- **Persistent Dataset / Dataset Version:** полные амплитуды, заголовки и структура в постоянном бинарном хранилище HPC; PostgreSQL содержит идентификаторы, метаданные, версии и ссылки.
-- **Working Dataset:** те же данные, загруженные в RAM вычислительного узла на время выполнения job.
+### 5.3. Ошибки и повторные запуски
 
-## 6. Настройки Partition и Union
+- Ошибка одной partition не отменяет уже работающие jobs того же Node Run.
+- После освобождения слота Execution Manager продолжает отправлять следующие partitions.
+- После завершения всех обязательных partitions Node Run получает `failed`, если хотя бы одна partition завершилась неуспешно.
+- Зависимый узел, которому нужен полный результат неуспешного Node Run, не запускается.
+- Каждый повторный запуск создаёт новый `PIPELINE_RUN` и начинается с первого узла и первого модуля. Автоматического продолжения предыдущего запуска нет.
+- Результаты и история предыдущих запусков не перезаписываются и автоматически не используются новым запуском.
 
-`partition` и `union` — настройки `PIPELINE_NODE_CONNECTIONS`, а не самостоятельные модули.
+## 6. Partition и Union в Pipeline
 
-- `partition` задаёт разбиение Dataset по значениям заголовков, например диапазонами или таблицей групп. Одна строка разбиения соответствует одной partition и одному SLURM Job целевого Node Run.
-- `union` сообщает целевому узлу, что несколько upstream partition-результатов должны быть представлены как один логический Dataset после успешного завершения требуемых jobs.
-- Модули `IN`, `OUT`, `SEGYIN`, `SEGYOUT` не должны самостоятельно управлять графом или планировать другие jobs.
-- Физическая организация partition-частей в бинарном хранилище и формат манифеста union остаются предметом отдельного проектирования.
+Разделение и объединение Dataset задаются настройками связей между Pipeline Nodes. Это не отдельные модули и не отдельные типы операций.
 
-## 7. Модель данных PostgreSQL
+**Partition** на связи определяет, как входной Dataset разделяется на части. Например, таблица диапазонов `inline_start`–`inline_end` задаёт отдельные partitions. Каждая строка таблицы соответствует одному SLURM Job целевого Node Run.
 
-PostgreSQL хранит структурированные данные и каталог Dataset Storage. Он **не хранит сами амплитудные массивы**.
+**Union** на связи определяет, что результаты нескольких upstream partitions передаются целевому узлу как один логический Dataset. Целевой узел с `union` ожидает завершения всех обязательных upstream jobs. Он может работать с логическим набором частей без обязательного предварительного копирования их в один физический файл.
+
+Пример структуры Pipeline:
+
+```text
+Node 1: SEGYIN -> OUT
+    |
+    | connection: partition
+    v
+Node 2: IN -> OUT
+    |
+    | connection: union
+    v
+Node 3: SEGYOUT
+```
+
+Это схема движения данных. Фактический набор модулей конкретного узла определяется его конфигурацией. Внутренняя организация бинарных partition-частей и манифеста логического Dataset остаётся отдельной задачей проектирования.
+
+## 7. PostgreSQL — таблицы и назначение
+
+PostgreSQL хранит структуру приложения, каталог Dataset и историю выполнения. Физические Data Assets находятся в `/home/user/spi/storage/data`, а амплитуды, заголовки и структура сохранённых Dataset — в `/home/user/spi/storage/datasets`.
 
 | Таблица | Назначение |
 |---|---|
-| `users` | Персональная кластерная учётная запись пользователя приложения (`unix_username`). |
-| `projects` | Персональные проекты пользователя. |
-| `compute_profiles` | Профили ресурсов SLURM, принадлежащие пользователю и доступные во всех его Projects. |
-| `data_assets` | Внешние физические файлы на HPC, зарегистрированные в проекте: входные и экспортированные SEG-Y. |
-| `datasets` | Стабильная идентичность логического Dataset в проекте. |
-| `dataset_versions` | Неизменяемые версии Dataset; содержат номер версии, при необходимости ссылку на родительскую версию, `storage_manifest_uri`, формат/версию бинарного хранилища, метаданные и связь с Module Run `OUT`, который сохранил результат. |
-| `dataset_version_sources` | Связи Dataset Version с Data Assets, использованными как исходные данные, для provenance. |
-| `module_definitions` | Реестр определений модулей и их версий; для MVP — `SEGYIN`, `IN`, `OUT`, `SEGYOUT`. |
-| `pipelines` | Сохранённые схемы Pipeline. |
-| `pipeline_nodes` | Логические узлы Pipeline; содержат ссылку на Compute Profile и лимит параллельных jobs. |
-| `pipeline_node_modules` | Модули внутри узла, их порядок добавления и конфигурация. |
-| `pipeline_node_connections` | Направленные связи Pipeline Nodes; здесь хранятся `partition_config` и `union_config` (например, JSONB). |
-| `pipeline_runs` | Конкретные запуски Pipeline, статусы, порядковый номер запуска и snapshot графа/параметров. |
-| `node_runs` | Фактические выполнения Pipeline Nodes в рамках Pipeline Run. |
-| `slurm_jobs` | SLURM Job ID, `node_run_id`, номер partition, параметры разбиения, ресурсы, состояние, узел и пути `stdout`/`stderr`. |
-| `module_runs` | Фактические выполнения отдельных модулей внутри конкретного SLURM Job/partition. |
-| `execution_events` | Структурированные события Pipeline Run, Node Run, Module Run и SLURM Job. |
+| `users` | Персональная учётная запись пользователя SPI и его `unix_username` |
+| `projects` | Персональные проекты пользователя |
+| `compute_profiles` | Сохранённые пользователем профили ресурсов SLURM (CPU, RAM, walltime и другие разрешённые параметры) |
+| `data_assets` | Зарегистрированные внешние файлы проекта: исходные и экспортированные SEG-Y; физические файлы размещаются в `/home/user/spi/storage/data/{project_id}/` |
+| `datasets` | Стабильная идентичность логического Dataset в проекте |
+| `dataset_versions` | Неизменяемые сохранённые состояния Dataset; содержат номер версии, метаданные и ссылку на бинарное представление/манифест |
+| `dataset_version_sources` | Связи Dataset Version с исходными Data Assets и порядок источников; в MVP импорт использует один исходный SEG-Y на Dataset |
+| `module_definitions` | Реестр модулей и версий; в MVP — `SEGYIN`, `IN`, `OUT`, `SEGYOUT` |
+| `pipelines` | Сохранённые схемы Pipeline проекта |
+| `pipeline_nodes` | Узлы Pipeline; включают выбранный Compute Profile и лимит параллельных jobs |
+| `pipeline_node_modules` | Модули узла, порядок их выполнения и конфигурация параметров |
+| `pipeline_node_connections` | Направленные связи между узлами; содержат настройки `partition` и `union` |
+| `pipeline_runs` | Конкретные запуски Pipeline, статус, номер запуска и snapshot конфигурации |
+| `node_runs` | Выполнение конкретного Pipeline Node в рамках Pipeline Run |
+| `slurm_jobs` | SLURM Job ID, Node Run, номер partition, ресурсы, состояние, вычислительный узел и пути `stdout`/`stderr` |
+| `module_runs` | Фактический запуск каждого модуля внутри конкретного SLURM Job/partition |
+| `execution_events` | Хронология событий Pipeline Run, Node Run, Module Run и SLURM Job |
 
-### 7.1. Намеренно отсутствующие таблицы MVP
+Физический каталог `/home/user/spi/storage/data/` называется `data`, но таблица PostgreSQL остаётся `data_assets`. Переименование каталога не меняет имя таблицы и её назначение.
 
-- `sessions` — Session исключена из модели.
-- `dataset_transformations` — отдельная таблица цепочки преобразований не требуется: состав и ход исполнения фиксируются через Pipeline snapshot, Module Runs и Execution Events.
-- `artifacts` — самостоятельные Artifact outputs пользовательских RAM-модулей отложены за пределы MVP.
-- отдельная `module_versions` не требуется, если каждая версия хранится отдельной записью `module_definitions` с полем `module_version`.
+### 7.1. Что не входит в модель MVP
 
-### 7.2. Ключевые связи
+- `sessions` — Session не используется.
+- `dataset_transformations` — отдельная таблица преобразований не нужна; состав Pipeline фиксируется в snapshot, фактическое исполнение — в Module Runs и Execution Events.
+- `artifacts` — самостоятельные Artifact outputs пользовательских вычислительных модулей отложены за пределы MVP.
+- Отдельная таблица `module_versions` не нужна: версия хранится в `module_definitions`.
+
+### 7.2. Основные связи
 
 - `users` 1:N `projects`.
 - `users` 1:N `compute_profiles`.
 - `projects` 1:N `data_assets`, `datasets`, `pipelines`.
 - `datasets` 1:N `dataset_versions`.
-- `dataset_versions` N:M `data_assets` через `dataset_version_sources` (в MVP обычно один исходный Data Asset на импортируемый Dataset).
-- `pipelines` 1:N `pipeline_nodes` и `pipeline_node_connections`.
-- `pipeline_nodes` 1:N `pipeline_node_modules`; `module_definitions` 1:N `pipeline_node_modules`.
-- `pipelines` 1:N `pipeline_runs`; `pipeline_runs` 1:N `node_runs`.
-- `node_runs` 1:N `slurm_jobs`; `slurm_jobs` 1:N `module_runs`.
-- `pipeline_node_modules` 1:N `module_runs`; `module_runs` 1:N `dataset_versions` для версий, сохранённых через `OUT`.
-- `execution_events` связаны с Pipeline Run и при необходимости с Node Run, Module Run и SLURM Job.
+- `dataset_versions` N:M `data_assets` через `dataset_version_sources`.
+- `pipelines` 1:N `pipeline_nodes`, `pipeline_node_connections` и `pipeline_runs`.
+- `pipeline_nodes` 1:N `pipeline_node_modules` и `node_runs`.
+- `module_definitions` 1:N `pipeline_node_modules`.
+- `pipeline_node_connections` связывает два `pipeline_nodes` одного Pipeline.
+- `pipeline_runs` 1:N `node_runs`.
+- `node_runs` 1:N `slurm_jobs`.
+- `slurm_jobs` 1:N `module_runs`.
+- `pipeline_node_modules` 1:N `module_runs`.
+- `execution_events` относятся к Pipeline Run и при необходимости к Node Run, SLURM Job и Module Run.
 
 ## 8. Mermaid ER-диаграмма
 
@@ -309,11 +376,14 @@ erDiagram
     USERS {
         uuid user_id PK
         string unix_username
+        datetime created_at
     }
     PROJECTS {
         uuid project_id PK
         uuid user_id FK
         string name
+        string description
+        datetime created_at
     }
     COMPUTE_PROFILES {
         uuid compute_profile_id PK
@@ -322,30 +392,35 @@ erDiagram
         int cpu_count
         string memory_limit
         string walltime
+        json slurm_options
     }
     DATA_ASSETS {
         uuid asset_id PK
         uuid project_id FK
-        string storage_uri
+        string name
         string format
+        string storage_uri
+        bigint size_bytes
         string checksum
+        json file_metadata
+        datetime created_at
     }
     DATASETS {
         uuid dataset_id PK
         uuid project_id FK
         string name
+        datetime created_at
     }
     DATASET_VERSIONS {
         uuid dataset_version_id PK
         uuid dataset_id FK
         int version_number
         uuid parent_version_id FK
-        uuid created_by_module_run_id FK
         string storage_manifest_uri
         json dataset_metadata
+        datetime created_at
     }
     DATASET_VERSION_SOURCES {
-        uuid dataset_version_source_id PK
         uuid dataset_version_id FK
         uuid asset_id FK
         int source_order
@@ -361,19 +436,21 @@ erDiagram
         uuid pipeline_id PK
         uuid project_id FK
         string name
+        string description
     }
     PIPELINE_NODES {
         uuid pipeline_node_id PK
         uuid pipeline_id FK
         uuid compute_profile_id FK
-        int max_parallel_jobs
         string node_key
+        string name
+        int max_parallel_jobs
     }
     PIPELINE_NODE_MODULES {
         uuid pipeline_node_module_id PK
         uuid pipeline_node_id FK
         uuid module_definition_id FK
-        int execution_order
+        int position
         json module_config
     }
     PIPELINE_NODE_CONNECTIONS {
@@ -390,12 +467,16 @@ erDiagram
         int execution_number
         string status
         json pipeline_snapshot
+        datetime started_at
+        datetime finished_at
     }
     NODE_RUNS {
         uuid node_run_id PK
         uuid pipeline_run_id FK
         uuid pipeline_node_id FK
         string status
+        datetime started_at
+        datetime finished_at
     }
     SLURM_JOBS {
         uuid slurm_job_record_id PK
@@ -403,8 +484,13 @@ erDiagram
         int partition_number
         string slurm_job_id
         string job_state
+        string node_list
+        json requested_resources
+        int exit_code
         string stdout_path
         string stderr_path
+        datetime submitted_at
+        datetime finished_at
     }
     MODULE_RUNS {
         uuid module_run_id PK
@@ -412,6 +498,9 @@ erDiagram
         uuid pipeline_node_module_id FK
         string status
         json parameters_snapshot
+        string error_message
+        datetime started_at
+        datetime finished_at
     }
     EXECUTION_EVENTS {
         uuid event_id PK
@@ -420,20 +509,24 @@ erDiagram
         uuid slurm_job_record_id FK
         uuid module_run_id FK
         int event_sequence
+        datetime event_time
         string event_type
         string event_level
+        string event_source
+        string message
+        json details
     }
 
     USERS ||--o{ PROJECTS : owns
-    USERS ||--o{ COMPUTE_PROFILES : creates
+    USERS ||--o{ COMPUTE_PROFILES : owns
     PROJECTS ||--o{ DATA_ASSETS : registers
     PROJECTS ||--o{ DATASETS : contains
     PROJECTS ||--o{ PIPELINES : contains
 
-    DATASETS ||--o{ DATASET_VERSIONS : versions
-    DATASET_VERSIONS ||--o{ DATASET_VERSION_SOURCES : provenance
+    DATASETS ||--|{ DATASET_VERSIONS : has
+    DATASET_VERSIONS ||--o{ DATASET_VERSION_SOURCES : records
     DATA_ASSETS ||--o{ DATASET_VERSION_SOURCES : source
-    MODULE_RUNS o|--o{ DATASET_VERSIONS : saves
+    DATASET_VERSIONS o|--o| DATASET_VERSIONS : parent_version
 
     MODULE_DEFINITIONS ||--o{ PIPELINE_NODE_MODULES : defines
     PIPELINES ||--|{ PIPELINE_NODES : contains
@@ -443,12 +536,12 @@ erDiagram
     PIPELINE_NODES ||--o{ PIPELINE_NODE_CONNECTIONS : target_node
     COMPUTE_PROFILES ||--o{ PIPELINE_NODES : selected_for
 
-    PIPELINES ||--o{ PIPELINE_RUNS : executed_as
+    PIPELINES ||--o{ PIPELINE_RUNS : runs
     PIPELINE_RUNS ||--o{ NODE_RUNS : contains
-    PIPELINE_NODES ||--o{ NODE_RUNS : executed_as
-    NODE_RUNS ||--o{ SLURM_JOBS : dispatched_as
-    SLURM_JOBS ||--o{ MODULE_RUNS : contains
-    PIPELINE_NODE_MODULES ||--o{ MODULE_RUNS : executed_module
+    PIPELINE_NODES ||--o{ NODE_RUNS : executes
+    NODE_RUNS ||--o{ SLURM_JOBS : dispatches
+    SLURM_JOBS ||--o{ MODULE_RUNS : executes
+    PIPELINE_NODE_MODULES ||--o{ MODULE_RUNS : module_instance
 
     PIPELINE_RUNS ||--o{ EXECUTION_EVENTS : records
     NODE_RUNS o|--o{ EXECUTION_EVENTS : node_events
@@ -456,41 +549,78 @@ erDiagram
     MODULE_RUNS o|--o{ EXECUTION_EVENTS : module_events
 ```
 
-## 9. Физическое хранение и развёртывание
+## 9. Mermaid диаграмма компонентов и выполнения
 
-| Компонент | Физическое размещение | Содержание |
-|---|---|---|
-| PostgreSQL `PGDATA` | Постоянное дисковое хранилище HPC или предоставленный администратором DB service | Файлы PostgreSQL, таблицы, индексы, WAL. Не RAM. |
-| Dataset Storage | Постоянная файловая система HPC | Внутренний бинарный формат Dataset: амплитуды, заголовки, метаданные и части/индексы. |
-| Data Asset Storage | Файловая система HPC | Исходные и экспортированные внешние файлы, например SEG-Y. |
-| Working Dataset | RAM вычислительного узла | Амплитуды и метаданные, загруженные для текущего SLURM Job/partition. |
-| `runtime.log` | Временное хранилище текущего выполнения | Оперативное представление событий до завершения соответствующего job. |
-| `runinfo.log` | Постоянное файловое хранилище HPC | Итоговый отчёт после завершения каждого partition job. |
-| `stdout` / `stderr` | Файловая система HPC, настроенная для SLURM | Системный вывод и ошибки процесса/job. |
+```mermaid
+flowchart TB
+    USER[Пользователь] --> BROWSER[Браузер]
+    BROWSER -->|SSH Tunnel| FRONTEND[Frontend<br/>React + TypeScript]
+    FRONTEND <-->|HTTP API| API[Backend API<br/>FastAPI + Uvicorn]
 
-Расположение PostgreSQL service и `PGDATA` пока не зафиксировано: доступность готового сервиса и подходящего места хранения необходимо подтвердить у администраторов; наличие пользовательского доступа к PostgreSQL Server пока не подтверждено. Пользователь не предполагается имеющим административные права на HPC. Не следует размещать `PGDATA` на NFS без подтверждения корректности locking/fsync и гарантий файловой системы. Dataset Storage также должен находиться на постоянном файловом хранилище, доступном нужным вычислительным заданиям. По имеющейся информации верхний предел памяти на одну задачу может достигать 1100 GB, но это не означает, что каждый job сможет получить такой объём: фактические ресурсы определяются Compute Profile, политиками SLURM и доступностью ресурсов. Контейнеризация через Apptainer не является обязательной зависимостью MVP и может рассматриваться позднее.
+    API <--> PG[(PostgreSQL<br/>/home/user/spi/database/postgres/data)]
+    API --> DATA[/Data Assets<br/>/home/user/spi/storage/data/]
+    API --> DATASETS[(Dataset Storage<br/>/home/user/spi/storage/datasets)]
+    API --> RUNS[/Run files<br/>/home/user/spi/runs/projects/pipelines/]
+    API --> EM[Execution Manager]
 
-## 10. Открытые архитектурные вопросы
+    EM <--> SLURM[SLURM Scheduler]
+    SLURM --> JOB1[Worker<br/>Partition Job 1]
+    SLURM --> JOB2[Worker<br/>Partition Job 2]
 
-1. Физическая структура собственного бинарного формата Dataset: один файл или набор файлов, манифест, индексы и организация блоков амплитуд.
-2. Физическая организация нескольких partition-частей и публикация логического Dataset при `union`.
-3. Совместимость прежнего MVP scope (2D) с примерами 3D SEG-Y и `inline` partitions.
-4. Проверка Partition Definition: пересечения, пропуски, полнота покрытия и отсутствующие заголовки.
-5. Гарантия размещения partition jobs на разных физических узлах SLURM (`--exclusive` или другой механизм).
-6. Поведение независимых ветвей Pipeline при ошибке одной ветви. Для partitions внутри одного Node Run согласовано: остальные jobs продолжаются, новые jobs отправляются по мере освобождения слотов.
-7. Конкретные ограничения Compute Profiles на целевом кластере.
-8. Фактический способ предоставления PostgreSQL Server и место `PGDATA`.
-9. Аутентификация Web App и защита локального порта/SSH Tunnel.
-10. Нужны ли явные адресуемые input/output ports на связях Pipeline.
-11. Технический контракт и изоляция пользовательских RAM → RAM модулей будущего этапа.
+    JOB1 <--> PG
+    JOB2 <--> PG
+    JOB1 <--> DATA
+    JOB2 <--> DATA
+    JOB1 <--> DATASETS
+    JOB2 <--> DATASETS
+    JOB1 --> RUNS
+    JOB2 --> RUNS
+    JOB1 -.-> RAM1[Working Dataset в RAM]
+    JOB2 -.-> RAM2[Working Dataset в RAM]
 
-## 11. Архитектурные ограничения MVP
+    API --> MON[Мониторинг и события]
+    MON --> PG
+```
 
-- Один пользователь работает со своими Projects под своей Unix-учётной записью HPC.
-- Web App и вычислительные SLURM Jobs разделены.
-- В одном SLURM Job одна partition и последовательная цепочка модулей одного Pipeline Node.
-- Compute Profile задаёт ресурсы одного job; максимальное число одновременно активных jobs задаётся отдельно на Pipeline Node.
-- `OUT` сохраняет амплитуды и остальные данные Working Dataset в собственный бинарный Dataset Storage; PostgreSQL не хранит амплитудные массивы.
-- `SEGYOUT` создаёт внешний SEG-Y Data Asset; `OUT` не является экспортом SEG-Y.
-- Для каждой завершившейся partition формируется собственный `runinfo.log`; `runtime.log` доступен только пока job выполняется.
-- Повторный запуск создаёт новый Pipeline Run с начала; автоматическое продолжение и автоматическое переиспользование выходов предыдущего запуска не выполняются.
+
+## 10. Мониторинг и логи
+
+- Источник структурированных данных для мониторинга — таблица `execution_events`; текущие состояния хранятся в соответствующих таблицах запусков и SLURM Jobs.
+- `runtime.log` отображает события текущего SLURM Job во время его выполнения. После завершения job файл удаляется.
+- `runinfo.log` создаётся сразу после завершения каждого SLURM Job, независимо от состояния остальных partitions. В нём собраны параметры запуска, partition, последовательность модулей, времена, итоговый статус, сведения SLURM и ошибки.
+- Имя каталога для конкретного задания: `{pipelinenodename}_{executionnumber}_{partitionnumber}`. Каталоги запусков размещаются внутри `/home/user/spi/runs/projects/pipelines/{project_id}/{pipeline_id}/{pipeline_run_id}/`.
+- `stdout` и `stderr` сохраняются для диагностики процесса и SLURM. Отдельные module logs не создаются.
+- Если Worker завершился аварийно и не успел записать `runinfo.log`, отчёт формирует Execution Manager по `execution_events` и состоянию SLURM.
+- После перезапуска Web App Execution Manager восстанавливает историю из PostgreSQL и сверяет активные Job ID с SLURM. Наличие или отсутствие лог-файла не определяет статус задания.
+
+## 11. Ограничения MVP и вопросы реализации
+
+В MVP:
+
+- один пользователь работает со своими Projects под собственной Unix-учётной записью;
+- совместное владение проектами несколькими пользователями и Session отсутствуют;
+- основной внешний формат — SEG-Y; ограничение по размерности данных определяется паспортом проекта;
+- постоянный Dataset хранится в собственном бинарном формате SPI;
+- реализуются `SEGYIN`, `IN`, `OUT`, `SEGYOUT`;
+- отдельные научные модули FILTER, SORT, FOURIER и пользовательские RAM → RAM модули не входят в MVP;
+- Artifact outputs пользовательских модулей отложены за пределы MVP;
+- визуализация амплитуд и заголовков в интерфейсе не входит в MVP;
+- повторный запуск всегда создаёт новый Pipeline Run с начала.
+
+Открытые технические вопросы:
+
+1. Структура собственного бинарного формата: один файл или набор файлов, манифест, блоки амплитуд, заголовки и индексы.
+2. Физическое представление нескольких partition-частей одной Dataset Version и правила публикации логического результата после `union`.
+3. Проверка Partition Definition: пересечения, пропуски, полнота диапазонов и отсутствующие SEG-Y headers.
+4. Проверка ограничений Compute Profiles и доступного числа одновременно выполняемых jobs.
+5. Механизм, гарантирующий размещение одновременно выполняемых partition jobs на разных физических вычислительных узлах.
+6. Поведение независимых ветвей Pipeline при ошибке одного Node Run.
+7. Точная схема входов/выходов Pipeline Nodes и необходимость явных портов на связях.
+8. Контракт и правила безопасности для пользовательских RAM → RAM модулей будущего этапа.
+
+---
+
+## 12. Связанные документы
+
+- `Паспорт проекта — MVP` — функциональные требования и границы MVP.
+- `operation_types.md` — направления переноса данных и назначение четырёх типов операций MVP.
