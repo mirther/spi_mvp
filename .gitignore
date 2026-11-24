@@ -1,0 +1,32 @@
+﻿# Personal configuration
+.env
+.env.*
+!.env.example
+
+# Local database, but preserve schema.sql
+database/*.db
+database/*.sqlite
+database/*.sqlite3
+
+# Python environment and caches
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Frontend dependencies and build
+frontend/node_modules/
+frontend/dist/
+
+# Generated runtime files
+logs/
+tmp/
+runtime/
+*.log
+*.pid
+
+# SSH private credentials
+*.ppk
+*.pem
+*.key

@@ -1,0 +1,18 @@
+
+{
+  "id": "segyout",
+  "name": "SEGYOUT",
+  "category": "Input / Output",
+  "description": "Write the current working dataset to a SEG-Y file.",
+  "inputs": ["WorkingDataset"],
+  "outputs": ["SEG-Y file"],
+  "parameters": [
+    {
+      "name": "path",
+      "label": "Output SEG-Y file",
+      "type": "string",
+      "required": true,
+      "description": "Destination path relative to the HPC SPI root. Use storage/data or projects."
+    }
+  ]
+}

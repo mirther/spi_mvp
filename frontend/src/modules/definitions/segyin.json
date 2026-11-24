@@ -1,0 +1,18 @@
+
+{
+  "id": "segyin",
+  "name": "SEGYIN",
+  "category": "Input / Output",
+  "description": "Read a SEG-Y file and load its samples and trace headers into the working dataset.",
+  "inputs": ["SEG-Y file"],
+  "outputs": ["WorkingDataset"],
+  "parameters": [
+    {
+      "name": "path",
+      "label": "Input SEG-Y file",
+      "type": "data_asset",
+      "required": true,
+      "description": "Path to a SEG-Y file in the HPC storage/data directory."
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0,<3.0
+pydantic-settings
+python-dotenv
+python-multipart
+segyio
+argon2-cffi>=23.1,<26
